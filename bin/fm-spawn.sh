@@ -50,10 +50,12 @@
 #   the new incarnation.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
-#   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
-#   axes chosen by firstmate at intake. They are only threaded into harnesses whose
-#   installed CLIs were verified to support that axis; unsupported axes are omitted
-#   from that harness's launch rather than guessed.
+#   --model <name> and --effort <low|medium|high|xhigh|max|default> are concrete
+#   profile axes chosen by firstmate at intake. They are only threaded into
+#   harnesses whose installed CLIs were verified to support that axis; unsupported
+#   axes are omitted from that harness's launch rather than guessed. `default` on
+#   either flag is an explicit statement that no axis was chosen, which a relaunch
+#   needs because an OMITTED flag there means "keep what the record says".
 #   --env <path> names ONE launch environment file, sourced with allexport in the
 #   destination pane immediately before the harness command runs, so a worker can
 #   be dispatched onto a gateway-routed or otherwise endpoint-redirected model as
@@ -620,7 +622,12 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
 fi
 case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
-  *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
+  # `default` is an explicit statement that no effort axis was chosen, exactly
+  # as it is for --model. It matters on the relaunch path, where the ABSENCE of
+  # a flag now means "keep what the record says": a caller that means the
+  # harness's own default has to be able to say so.
+  default) EFFORT= ;;
+  *) echo "error: --effort must be one of low, medium, high, xhigh, max, default" >&2; exit 1 ;;
 esac
 # The raw launch-command escape hatch is now an explicit flag rather than an
 # accident of whitespace, and it must STATE the record it cannot be introspected

@@ -750,6 +750,43 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
 }
 
+# A secondmate's model and effort are a durable configured pin re-resolved on
+# every respawn, so a pin naming no model must RESET the axis rather than let
+# the previous incarnation's model survive. The launch owner keeps a recorded
+# model when no flag is passed - that is what makes a plain relaunch reproduce
+# the launch it replaces - so this transaction has to state `default` rather
+# than omit the flag, and this test is what holds it to that.
+test_secondmate_relaunch_resets_axes_the_configured_pin_does_not_name() {
+  local dir home out rc
+  dir=$(new_case smreset sm9)
+  home="$dir/home"
+  mkdir -p "$home/config" "$home/data/sm9"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf '# secondmate brief\n' > "$home/data/sm9/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm9\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm9"; echo "endpoint_task_id=sm9"
+    echo "worktree=$dir/smhome"; echo "project=$dir/smhome"
+    echo "harness=codex"; echo "kind=secondmate"; echo "mode=secondmate"
+    echo "yolo=off"; echo "model=gpt-5-previous"; echo "effort=xhigh"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm9.meta"
+  printf '%s\n' "fm-sm9" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm9 relaunch); rc=$?
+  expect_code 0 "$rc" "a secondmate relaunch with a bare pin should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" sm9 model)" = default ] \
+    || fail "a bare secondmate pin must reset the model, got '$(meta_field "$dir" sm9 model)'"
+  [ "$(meta_field "$dir" sm9 effort)" = default ] \
+    || fail "a bare secondmate pin must reset the effort, got '$(meta_field "$dir" sm9 effort)'"
+  pass "fm-control relaunch: a secondmate pin naming no model or effort resets both instead of inheriting them"
+}
+
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   local dir home out rc
   dir=$(new_case invalid-effort sm6)
@@ -1663,6 +1700,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_secondmate_relaunch_resets_axes_the_configured_pin_does_not_name
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes

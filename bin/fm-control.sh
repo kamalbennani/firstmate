@@ -829,9 +829,14 @@ do_relaunch() {
   # per-task harness wiring before arming the new one, so nothing to do here.
   RELAUNCH_TX="${BASHPID:-$$}.$(date -u +%Y%m%dT%H%M%SZ).$RANDOM"
   journal_write launching "${CHECKPOINT_LINES[@]}" "$note_line" "relaunch_tx=$RELAUNCH_TX"
-  spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
-  [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
-  [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  # Every axis this transaction resolved is passed EXPLICITLY, `default`
+  # included. On the launch owner's side the absence of --model or --effort on a
+  # relaunch means "keep what the task's record says", so that it reproduces the
+  # launch it replaces rather than resetting to a harness default; a decision to
+  # reset - a harness switch, or a secondmate pin with no model token - has to be
+  # stated rather than implied by an omitted flag.
+  spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS"
+    --model "$TARGET_MODEL" --effort "$TARGET_EFFORT")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
