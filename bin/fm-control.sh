@@ -736,14 +736,25 @@ resolve_relaunch_profile() {
   # transaction, exactly as fm_control_harness_supported and
   # fm_control_harness_supports_kind are asked above rather than left to
   # fm-spawn.sh's own refusal.
-  if [ -n "$TARGET_ENV" ]; then
-    resolve_env_file "$TARGET_ENV" >/dev/null \
-      || die "task $ID records a launch environment file that is no longer usable, so relaunching would stop the running agent for a launch that must be refused; restore that file, or dispatch the task again"
-  fi
+  recheck_target_env
   if [ "$TARGET_HARNESS" = claude ] && [ -z "$TARGET_ENV" ] \
      && claude_model_needs_launch_environment "$TARGET_MODEL"; then
     die "claude model '$TARGET_MODEL' carries a routing qualifier, so claude's default first-party endpoint cannot serve it, and relaunching $ID onto it without --env would stop the running agent for a launch that must be refused. Pass --env <path> naming the launch environment that serves this model, or choose a first-party alias or claude-* id"
   fi
+}
+
+# recheck_target_env: re-validate TARGET_ENV's usability. A file's readability
+# can change at any moment (removed, replaced, permissions flipped), so the
+# check resolve_relaunch_profile already ran is not proof that the file is
+# still usable by the time do_relaunch actually stops the agent - safe_checkpoint
+# and record_note do real filesystem and git work in between. do_relaunch calls
+# this again immediately before stopping the agent to shrink that window to
+# nothing, exactly as the first call catches a recorded environment that was
+# already broken before anything was touched.
+recheck_target_env() {
+  [ -n "$TARGET_ENV" ] || return 0
+  resolve_env_file "$TARGET_ENV" >/dev/null \
+    || die "task $ID records a launch environment file that is no longer usable, so relaunching would stop the running agent for a launch that must be refused; restore that file, or dispatch the task again"
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch
@@ -882,6 +893,14 @@ do_relaunch() {
 
   record_note
   journal_write noted "${CHECKPOINT_LINES[@]}" "$note_line"
+
+  # Re-validate the launch environment right before the agent is actually
+  # stopped: everything between resolve_relaunch_profile's first check and here
+  # (safe_checkpoint, record_note) is a window in which the file could have
+  # been removed, replaced, or made unreadable out from under a predictably
+  # refused replacement. Dying here still lands in the "checkpoint|noted"
+  # rollback branch - the agent has not been touched yet.
+  recheck_target_env
 
   journal_write stopping "${CHECKPOINT_LINES[@]}" "$note_line"
   exit_result=$(do_exit)

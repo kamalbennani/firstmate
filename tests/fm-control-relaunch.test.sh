@@ -226,6 +226,17 @@ SH
   chmod +x "$1/fakebin/git"
 }
 
+make_git_env_race_stub() {  # <case-dir> <path-to-remove-during-checkpoint>
+  cat > "$1/fakebin/git" <<SH
+#!/usr/bin/env bash
+case "\$*" in
+  *' status --porcelain') rm -f "$2" ;;
+esac
+exec "\$FM_REAL_GIT" "\$@"
+SH
+  chmod +x "$1/fakebin/git"
+}
+
 make_mv_failure_stub() {  # <case-dir>
   cat > "$1/fakebin/mv" <<'SH'
 #!/usr/bin/env bash
@@ -1816,6 +1827,42 @@ test_control_relaunch_refuses_a_raw_launched_task_before_stop() {
   pass "fm-control relaunch: a raw-launched task refuses before the agent is stopped"
 }
 
+# resolve_relaunch_profile's environment check runs before safe_checkpoint and
+# record_note, which do real filesystem and git work of their own. If the
+# recorded environment file is removed during that window - after the
+# pre-stop check passed, but before the agent is actually stopped - a
+# recheck must catch it immediately before do_exit runs, or the agent is
+# stopped for a replacement fm-spawn.sh is certain to refuse. The git shim
+# below deletes the file exactly inside that window (safe_checkpoint's own
+# `git status --porcelain` call), reproducing the race deterministically
+# instead of racing a background process against a microsecond gap.
+test_control_relaunch_refuses_an_environment_removed_during_checkpoint() {
+  local dir out rc envfile meta brief real_git
+  real_git=$(command -v git)
+  dir=$(new_case profileenvrace rl51)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl51 claude "env=$envfile"
+  meta="$dir/home/state/rl51.meta"
+  cp "$meta" "$dir/meta.before"
+  brief="$dir/home/data/rl51/brief.md"
+  cp "$brief" "$dir/brief.before"
+  make_git_env_race_stub "$dir" "$envfile"
+  out=$(FM_REAL_GIT="$real_git" \
+    run_control "$dir" rl51 relaunch --note "racing environment"); rc=$?
+  expect_code 1 "$rc" "an environment removed after the pre-stop check but before the stop must still refuse"
+  assert_contains "$out" 'no longer usable' "the refusal must say the environment cannot be reproduced"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  cmp -s "$brief" "$dir/brief.before" \
+    || fail "a refused relaunch must restore the instructions byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "an environment that breaks between the pre-stop check and the actual stop must not stop the running agent"
+  [ "$(journal_field "$dir" rl51 phase)" = failed:noted ] \
+    || fail "the journal must show the refusal landed before stopping (phase=failed:noted), not during or after it"
+  pass "fm-control relaunch: an environment removed between the pre-stop check and the stop still refuses before the agent is touched"
+}
+
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_control_harness_switch_resets_the_recorded_launch_environment
 test_control_harness_switch_with_explicit_env_resupplies_it
@@ -1823,6 +1870,7 @@ test_control_env_override_without_a_harness_switch_is_refused
 test_control_relaunch_refuses_an_unusable_recorded_environment_before_stop
 test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_stop
 test_control_relaunch_refuses_a_raw_launched_task_before_stop
+test_control_relaunch_refuses_an_environment_removed_during_checkpoint
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
