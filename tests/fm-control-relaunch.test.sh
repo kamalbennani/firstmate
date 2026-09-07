@@ -1798,12 +1798,31 @@ test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_st
   pass "fm-control relaunch: moving a task onto a model its environment cannot serve refuses before the agent is stopped"
 }
 
+test_control_relaunch_refuses_a_raw_launched_task_before_stop() {
+  local dir out rc meta
+  dir=$(new_case profilerawguard rl50)
+  add_ship_task "$dir" rl50 claude "launch=raw"
+  meta="$dir/home/state/rl50.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl50 relaunch --note "continue anyway"); rc=$?
+  expect_code 1 "$rc" "a relaunch of a raw-launched task must refuse"
+  assert_contains "$out" 'raw command' "the refusal must say the original launch is not recorded"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused for a raw-launched task must not stop the running agent"
+  [ ! -e "$dir/home/state/rl50.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  pass "fm-control relaunch: a raw-launched task refuses before the agent is stopped"
+}
+
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_control_harness_switch_resets_the_recorded_launch_environment
 test_control_harness_switch_with_explicit_env_resupplies_it
 test_control_env_override_without_a_harness_switch_is_refused
 test_control_relaunch_refuses_an_unusable_recorded_environment_before_stop
 test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_stop
+test_control_relaunch_refuses_a_raw_launched_task_before_stop
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

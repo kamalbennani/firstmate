@@ -634,6 +634,15 @@ relaunch_rollback() {
 resolve_relaunch_profile() {
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
+  # A raw launch's command is deliberately never recorded (it could carry inline
+  # secrets), so it cannot be reproduced. The launch owner (fm-spawn --relaunch)
+  # already refuses this, but only after do_relaunch has stopped the running
+  # agent (do_exit runs before fm-spawn.sh is ever invoked - see do_relaunch
+  # below). Repeating the refusal here, before anything is stopped, keeps a
+  # predictably refused replacement from stranding the task with no agent
+  # running, exactly as the env and harness-kind guards below do.
+  [ "$(fm_meta_get "$META" launch)" != raw ] \
+    || die "task $ID was launched from a raw command, which is not recorded and cannot be reproduced, so relaunching would stop the running agent for a launch that must be refused; tear the task down and dispatch it again rather than relaunching"
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   PRIOR_ENV=$(fm_meta_get "$META" env)
