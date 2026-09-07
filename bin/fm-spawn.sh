@@ -78,11 +78,15 @@
 #   is granted. Composition with config/launch-env-allowlist is filter-then-grant:
 #   the source runs INSIDE the filtered `/usr/bin/env -i` payload, so a name the
 #   file sets does not need to appear in the allowlist, a name in both is set by
-#   the file, and neither option can silently defeat the other. A relaunch
-#   re-applies the recorded env= rather than re-resolving it and refuses when that
-#   file is no longer usable, so a relaunch either reproduces the original launch
-#   or stops; --env is refused alongside --relaunch and on a remote secondmate
-#   route, whose file would live on another host.
+#   the file, and neither option can silently defeat the other. A same-harness
+#   relaunch re-applies the recorded env= rather than re-resolving it and refuses
+#   when that file is no longer usable, so it either reproduces the original
+#   launch or stops; --env is refused alongside a same-harness relaunch. A
+#   harness-switching relaunch instead RESETS env exactly as it resets model and
+#   effort, because a launch environment built for one adapter is not proven for
+#   another; an explicit --env on that same relaunch command re-supplies it. --env
+#   is also refused on a remote secondmate route, whose file would live on
+#   another host.
 #   MODEL/ENVIRONMENT GUARD. claude serves an id from its own documented native
 #   space: a short alias (opus, sonnet, fable, ...) or a full claude-* name
 #   (`claude --help`, Claude Code 2.1.263). An id carrying a routing qualifier
@@ -688,7 +692,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
-  [ "$ENV_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded launch environment; --env cannot override it" >&2; exit 1; }
+  # --env's own refusal is deferred until the harness axis is resolved below
+  # (a same-harness relaunch refuses it; a harness-switching relaunch allows
+  # it, exactly as the model/effort reset does), so it is not checked here.
   [ "$RAW_SET" -eq 0 ] || { echo "error: --relaunch launches from the task's own record; a raw command cannot be reproduced from it, so --raw is refused" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
@@ -1462,15 +1468,28 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID was launched from a raw command, which is not recorded and cannot be reproduced; tear the task down and dispatch it again rather than relaunching onto a different launch" >&2
     exit 1
   }
-  # The recorded launch environment is re-applied, never re-resolved: the model
-  # this task records may only be servable with it, so a relaunch reproduces the
-  # original launch or refuses.
-  ENV_FILE=$(fm_meta_get "$RELAUNCH_META" env)
-  if [ -n "$ENV_FILE" ]; then
-    ENV_FILE=$(resolve_env_file "$ENV_FILE") || {
-      echo "error: task $ID records a launch environment file that is no longer usable, so a relaunch cannot reproduce the environment its recorded model needs; restore that file or dispatch the task again" >&2
+  # A same-harness relaunch re-applies the recorded env=, never re-resolving it:
+  # the model this task records may only be servable with it, so it reproduces
+  # the original launch or refuses. A harness-switching relaunch instead resets
+  # env exactly as it resets model and effort just below, because a launch
+  # environment built for one adapter is not proven for another; an explicit
+  # --env on that same relaunch command re-supplies it.
+  if [ -z "$HARNESS_ARG" ] || [ "$HARNESS_ARG" = "$RELAUNCH_PRIOR_HARNESS" ]; then
+    [ "$ENV_SET" -eq 0 ] || {
+      echo "error: --relaunch reuses the task's recorded launch environment; --env cannot override it" >&2
       exit 1
     }
+    ENV_FILE=$(fm_meta_get "$RELAUNCH_META" env)
+    if [ -n "$ENV_FILE" ]; then
+      ENV_FILE=$(resolve_env_file "$ENV_FILE") || {
+        echo "error: task $ID records a launch environment file that is no longer usable, so a relaunch cannot reproduce the environment its recorded model needs; restore that file or dispatch the task again" >&2
+        exit 1
+      }
+    fi
+  elif [ "$ENV_SET" -eq 1 ]; then
+    ENV_FILE=$(resolve_env_file "$ENV_FILE") || exit 1
+  else
+    ENV_FILE=
   fi
   # Model and effort follow the same rule the harness axis follows just below,
   # and the same rule bin/fm-control.sh applies on its side: an UNCHANGED
@@ -1967,10 +1986,12 @@ fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
 fi
-# Fires on the fresh and the relaunch path alike: a relaunch re-applies the
-# recorded env=, so a task that was launched with one still passes, and a
-# relaunch that moves an existing task onto a qualified model without one is
-# refused here rather than launching a different model than it records.
+# Fires on the fresh and the relaunch path alike: a same-harness relaunch
+# re-applies the recorded env=, so a task that was launched with one still
+# passes, and a relaunch that moves an existing task onto a qualified model
+# without one is refused here rather than launching a different model than it
+# records. A harness-switching relaunch resets both model and env together, so
+# an explicit --model there still needs its own explicit --env.
 # Deliberately not applied to a --raw launch: fm-spawn does not compose that
 # command's model flag, so it has nothing to guard (see the header).
 if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = claude ] && [ -z "$ENV_FILE" ] \
@@ -4133,7 +4154,10 @@ fi
 # 2026-09-07 in a real tmux pane:
 #   1. Fail-closed. The source is the first link of an && chain covering the
 #      whole launch, so a file that vanished since validation stops the launch
-#      instead of running the harness without its environment.
+#      instead of running the harness without its environment. The `|| { set
+#      +a; false; }` branch turns allexport back off on that failure path too,
+#      so a refused launch never leaves the pane's shell in allexport mode for
+#      whatever is typed into it next.
 #   2. No extra process. The chain runs in the pane's own shell and the launch
 #      command is its last member, so with no allowlist the process tree is
 #      shape-identical to a native launch - measured: pane shell plus the
@@ -4175,7 +4199,7 @@ if [ -n "$ENV_FILE" ]; then
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     LAUNCH_ENV_REASSERT="$LAUNCH_ENV_REASSERT TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT")"
   fi
-  LAUNCH="set -a; . $(shell_quote "$ENV_FILE") && set +a && $LAUNCH_ENV_REASSERT && { $LAUNCH; }"
+  LAUNCH="{ set -a; { . $(shell_quote "$ENV_FILE") && set +a; } || { set +a; false; }; } && $LAUNCH_ENV_REASSERT && { $LAUNCH; }"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'

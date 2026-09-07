@@ -1692,7 +1692,71 @@ test_spawn_relaunch_refuses_a_qualified_model_without_an_environment() {
   pass "fm-spawn --relaunch: moving a task onto a model its environment cannot serve refuses"
 }
 
+test_control_harness_switch_resets_the_recorded_launch_environment() {
+  local dir out rc envfile
+  dir=$(new_case profileenvreset rl45)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl45 claude "env=$envfile"
+  sed -i.bak 's/^model=default$/model=openai\/gpt-5.6-luna/' "$dir/home/state/rl45.meta"
+  rm -f "$dir/home/state/rl45.meta.bak"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl45 relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl45 env)" ] \
+    || fail "a launch environment chosen for the old harness must not carry to a different one, got '$(meta_field "$dir" rl45 env)'"
+  [ "$(meta_field "$dir" rl45 model)" = default ] \
+    || fail "a model chosen for the old harness must not carry to a different one"
+  pass "fm-control relaunch: a harness switch resets the recorded launch environment unless --env names it too"
+}
+
+test_control_harness_switch_with_explicit_env_resupplies_it() {
+  local dir out rc oldenvfile newenvfile
+  dir=$(new_case profileenvresupply rl46)
+  oldenvfile="$dir/old-gateway.env"
+  newenvfile="$dir/new-gateway.env"
+  write_gateway_env "$oldenvfile"
+  {
+    printf '# synthetic launch environment, no real credential\n'
+    printf "FM_TEST_GATEWAY_TOKEN='synthetic-resupply-token'\n"
+  } > "$newenvfile"
+  add_ship_task "$dir" rl46 claude "env=$oldenvfile"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl46 relaunch --harness codex --env "$newenvfile" --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch with an explicit --env should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl46 env)" = "$newenvfile" ] \
+    || fail "an explicit --env on a harness switch should record the new environment, got '$(meta_field "$dir" rl46 env)'"
+  assert_no_grep synthetic-resupply-token "$dir/home/state/rl46.meta" \
+    "the harness switch leaked an environment value into the task record"
+  assert_no_grep synthetic-resupply-token "$dir/fake/literal" \
+    "the harness switch leaked an environment value into the launch text"
+  pass "fm-control relaunch: an explicit --env on a harness switch re-supplies the launch environment, path only"
+}
+
+test_control_env_override_without_a_harness_switch_is_refused() {
+  local dir out rc envfile meta
+  dir=$(new_case profileenvnoswitch rl47)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl47 claude "env=$envfile"
+  meta="$dir/home/state/rl47.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl47 relaunch --env "$envfile" --note "no harness change"); rc=$?
+  expect_code 1 "$rc" "--env without a harness switch should be refused"
+  assert_contains "$out" "harness is not changing" "the refusal should name the unchanged-harness rule"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused --env override must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused --env override must leave the original agent alive"
+  [ ! -e "$dir/home/state/rl47.control-relaunch" ] \
+    || fail "a refused --env override must not create a durable journal"
+  pass "fm-control relaunch: --env cannot override the recorded launch environment without a harness switch"
+}
+
 test_prefixed_recorded_harness_requires_explicit_replacement
+test_control_harness_switch_resets_the_recorded_launch_environment
+test_control_harness_switch_with_explicit_env_resupplies_it
+test_control_env_override_without_a_harness_switch_is_refused
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

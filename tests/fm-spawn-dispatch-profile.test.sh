@@ -1256,12 +1256,15 @@ SH
   for shell in /bin/sh /bin/bash /bin/zsh; do
     [ -x "$shell" ] || continue
     rm -f "$marker"
-    env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
-      "$shell" -c "$launch" >/dev/null 2>&1 || true
+    flags=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      "$shell" -c "{ $launch; } >/dev/null 2>&1; printf 'FLAGS=%s\n' \"\$-\"")
     assert_absent "$marker" \
       "a launch whose env file vanished must not run the harness in $shell"
+    case "$flags" in
+      FLAGS=*a*) fail "a launch whose env file vanished left allexport (set -a) enabled afterward in $shell: $flags" ;;
+    esac
   done
-  pass "--env fails closed: a file gone at launch time stops the launch instead of running without it"
+  pass "--env fails closed: a file gone at launch time stops the launch instead of running without it, and does not leave allexport enabled"
 }
 
 test_launch_env_file_invalid_path_refuses_before_any_task_state() {

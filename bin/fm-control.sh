@@ -5,7 +5,7 @@
 # Usage: fm-control.sh <task-id> interrupt
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
-#                                         [--effort <level>]
+#                                         [--effort <level>] [--env <path>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -40,6 +40,12 @@
 #              plus its optional model and effort tokens) exactly as any other
 #              respawn does, while a ship or scout keeps the exact adapter
 #              already recorded for it.
+#              The task's recorded launch environment (--env at dispatch time;
+#              docs/agent-control.md owns the schema) follows the same rule as
+#              model and effort: an unchanged harness keeps it, a harness switch
+#              resets it, and an explicit --env on this relaunch re-supplies it
+#              for the new harness. Only the file's path ever travels through
+#              this command, never its contents.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -192,9 +198,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_ENV=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ENV_SET=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -207,6 +215,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      env) NEW_ENV=$control_arg; ENV_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -224,6 +233,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --env) control_want_value=env ;;
+    --env=*) NEW_ENV=${control_arg#--env=}; ENV_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -241,12 +252,13 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$ENV_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --env, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$ENV_SET" = 0 ] || [ -n "$NEW_ENV" ] || die "--env requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max" ;;
@@ -520,9 +532,11 @@ CONFIG_MODEL=
 CONFIG_EFFORT=
 PRIOR_MODEL=
 PRIOR_EFFORT=
+PRIOR_ENV=
 TARGET_HARNESS=$HARNESS
 TARGET_MODEL=
 TARGET_EFFORT=
+TARGET_ENV=
 
 journal_write() {  # <phase> [extra-line]...
   local phase=$1
@@ -616,6 +630,7 @@ resolve_relaunch_profile() {
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  PRIOR_ENV=$(fm_meta_get "$META" env)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
@@ -681,6 +696,21 @@ resolve_relaunch_profile() {
     TARGET_EFFORT=$PRIOR_EFFORT
   else
     TARGET_EFFORT=default
+  fi
+  # The recorded launch environment follows the same rule: it is not proven to
+  # serve a different adapter, so an unchanged harness keeps it, a harness
+  # switch resets it, and the launch owner (fm-spawn --relaunch) refuses an
+  # explicit --env paired with an unchanged harness exactly as it refuses one
+  # on any other same-harness relaunch - caught here, before the old agent is
+  # touched, rather than left to that later refusal.
+  if [ "$ENV_SET" = 1 ]; then
+    [ "$TARGET_HARNESS" != "$PRIOR_HARNESS" ] \
+      || die "task $ID's harness is not changing; --env cannot override the task's recorded launch environment (only a harness switch resets it)"
+    TARGET_ENV=$NEW_ENV
+  elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
+    TARGET_ENV=$PRIOR_ENV
+  else
+    TARGET_ENV=
   fi
 }
 
@@ -837,6 +867,13 @@ do_relaunch() {
   # stated rather than implied by an omitted flag.
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS"
     --model "$TARGET_MODEL" --effort "$TARGET_EFFORT")
+  # Unlike model/effort, env is never passed when it is merely being carried
+  # forward: the launch owner already reproduces a same-harness relaunch's
+  # recorded env= on its own and refuses an --env that tries to override it.
+  # --env is only ever passed here for an explicit re-supply on a harness
+  # switch (resolve_relaunch_profile's die guard ensures ENV_SET=1 implies
+  # exactly that case).
+  [ "$ENV_SET" = 0 ] || spawn_args+=(--env "$TARGET_ENV")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
