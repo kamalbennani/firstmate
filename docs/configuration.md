@@ -400,7 +400,7 @@ A crew dispatch profile carries the same axis as an optional `env` field, so it 
 
 The value is a path, never inline values, because these files hold live credentials.
 Firstmate validates the path and never opens the file, so its contents cannot reach the task's durable record, the launch command, the pane's visible history, or any log.
-Only the path is recorded, and a relaunch re-applies that recorded path rather than resolving a new one.
+Only the path is recorded; how a relaunch treats that recorded path is owned by [transactional relaunch](agent-control.md#transactional-relaunch).
 The path must be absolute, because the destination pane resolves it rather than the invoking Firstmate process.
 A missing, unreadable, non-regular, or relative path stops the launch before any endpoint, local copy, or durable record exists, and a file that disappears between that check and the launch stops the launch rather than starting the worker without its environment.
 
