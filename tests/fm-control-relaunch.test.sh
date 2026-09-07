@@ -1753,10 +1753,57 @@ test_control_env_override_without_a_harness_switch_is_refused() {
   pass "fm-control relaunch: --env cannot override the recorded launch environment without a harness switch"
 }
 
+# do_relaunch stops the running agent (do_exit) BEFORE fm-spawn.sh is ever
+# invoked, so a launch prerequisite fm-spawn.sh would refuse on its own -
+# an unusable recorded environment file, or a claude model that needs one it
+# does not have - must be caught in resolve_relaunch_profile, on the pre-stop
+# side of the transaction, or a predictably refused replacement strands the
+# task with no agent running at all.
+test_control_relaunch_refuses_an_unusable_recorded_environment_before_stop() {
+  local dir out rc envfile meta
+  dir=$(new_case profileenvgone rl48)
+  envfile="$dir/gateway.env"
+  write_gateway_env "$envfile"
+  add_ship_task "$dir" rl48 claude "env=$envfile"
+  meta="$dir/home/state/rl48.meta"
+  cp "$meta" "$dir/meta.before"
+  rm -f "$envfile"
+  out=$(run_control "$dir" rl48 relaunch --note "recorded env vanished"); rc=$?
+  expect_code 1 "$rc" "a relaunch whose recorded environment is gone must refuse"
+  assert_contains "$out" 'no longer usable' "the refusal must say the recorded environment cannot be reproduced"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused for an unusable environment must not stop the running agent"
+  [ ! -e "$dir/home/state/rl48.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  pass "fm-control relaunch: an unusable recorded launch environment refuses before the agent is stopped"
+}
+
+test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_stop() {
+  local dir out rc meta
+  dir=$(new_case profileguard rl49)
+  add_ship_task "$dir" rl49 claude
+  meta="$dir/home/state/rl49.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl49 relaunch --model openai/gpt-5.6-luna --note "moving models"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a qualified model with no environment must refuse"
+  assert_contains "$out" 'routing qualifier' "the refusal must explain why claude cannot serve it"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused relaunch must leave metadata byte-identical"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a relaunch refused for a missing launch environment must not stop the running agent"
+  [ ! -e "$dir/home/state/rl49.control-relaunch" ] \
+    || fail "a refused relaunch must not create a durable journal"
+  pass "fm-control relaunch: moving a task onto a model its environment cannot serve refuses before the agent is stopped"
+}
+
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_control_harness_switch_resets_the_recorded_launch_environment
 test_control_harness_switch_with_explicit_env_resupplies_it
 test_control_env_override_without_a_harness_switch_is_refused
+test_control_relaunch_refuses_an_unusable_recorded_environment_before_stop
+test_control_relaunch_refuses_a_qualified_model_without_an_environment_before_stop
 test_same_harness_relaunch_keeps_the_profile_axes
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

@@ -142,6 +142,12 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-launch-env-lib.sh
+. "$SCRIPT_DIR/fm-launch-env-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -711,6 +717,23 @@ resolve_relaunch_profile() {
     TARGET_ENV=$PRIOR_ENV
   else
     TARGET_ENV=
+  fi
+  # The launch owner (fm-spawn --relaunch) re-validates TARGET_ENV and refuses
+  # a claude launch onto a routing-qualified model with none, but only after
+  # do_relaunch has already stopped the running agent (do_exit runs before
+  # fm-spawn.sh is ever invoked - see do_relaunch below). A predictably
+  # refused replacement must not be allowed to strand the task with no agent
+  # running, so both checks are repeated here, on the pre-stop side of the
+  # transaction, exactly as fm_control_harness_supported and
+  # fm_control_harness_supports_kind are asked above rather than left to
+  # fm-spawn.sh's own refusal.
+  if [ -n "$TARGET_ENV" ]; then
+    resolve_env_file "$TARGET_ENV" >/dev/null \
+      || die "task $ID records a launch environment file that is no longer usable, so relaunching would stop the running agent for a launch that must be refused; restore that file, or dispatch the task again"
+  fi
+  if [ "$TARGET_HARNESS" = claude ] && [ -z "$TARGET_ENV" ] \
+     && claude_model_needs_launch_environment "$TARGET_MODEL"; then
+    die "claude model '$TARGET_MODEL' carries a routing qualifier, so claude's default first-party endpoint cannot serve it, and relaunching $ID onto it without --env would stop the running agent for a launch that must be refused. Pass --env <path> naming the launch environment that serves this model, or choose a first-party alias or claude-* id"
   fi
 }
 
