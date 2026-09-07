@@ -1194,6 +1194,42 @@ test_launch_env_file_cannot_redefine_firstmate_operational_variables() {
   pass "an --env file cannot silently redefine Firstmate's own operational variables"
 }
 
+# The path is the one part of an env file that DOES enter the launch text, so
+# it has to survive shell quoting intact: a credential file living under a
+# directory with an apostrophe or a dollar sign must still be the file the pane
+# sources, not a fragment the pane re-interprets.
+test_launch_env_file_path_survives_shell_quoting() {
+  local rec id out status launch probe envfile shell result
+  id='envfile-quoted-path'
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  # A deliberately hostile file name: apostrophe, double quotes, spaces, and a
+  # dollar sign. $'...' keeps it literal here rather than re-quoting it twice.
+  envfile="$CASE_DIR/"$'it\'s a "weird" $path.env'
+  probe="$CASE_DIR/probe.sh"
+  write_probe_env "$envfile" synthetic-quoted
+  write_env_probe_script "$probe"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" --env "$envfile" \
+    --raw "/bin/sh '$probe'" --harness probe-sh --model default)
+  status=$?
+  expect_code 0 "$status" "an adversarially quoted --env path should spawn: $out"
+  assert_grep "env=$envfile" "$HOME_DIR/state/$id.meta" \
+    "the record must hold the path verbatim"
+  launch=$(cat "$LAUNCH_LOG")
+  for shell in /bin/sh /bin/bash /bin/zsh; do
+    [ -x "$shell" ] || continue
+    result=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
+      "$shell" -c "$launch") || fail "quoted-path launch failed in $shell"
+    case "$result" in
+      synthetic-quoted*) : ;;
+      *) fail "the quoted env path did not deliver its values in $shell"$'\n'"$result" ;;
+    esac
+  done
+  pass "an --env path carrying quotes, spaces and a dollar sign reaches the pane intact"
+}
+
 test_launch_env_file_fail_closed_when_removed_after_validation() {
   local rec id out status launch probe envfile marker shell
   id='envfile-race'
@@ -1381,6 +1417,7 @@ test_launch_environment_inheritance_preserves_on_source_errors
 test_launch_env_file_grants_values_and_records_only_the_path
 test_launch_env_file_cannot_redefine_firstmate_operational_variables
 test_launch_env_file_wraps_every_harness_launch_validly
+test_launch_env_file_path_survives_shell_quoting
 test_launch_env_file_fail_closed_when_removed_after_validation
 test_launch_env_file_invalid_path_refuses_before_any_task_state
 test_claude_qualified_model_requires_a_launch_environment
