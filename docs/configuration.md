@@ -338,7 +338,15 @@ Its `remove` action excises only the marker-delimited Firstmate region and remov
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
-## Worker launch environment (config/launch-env-allowlist)
+## Worker launch environment (config/launch-env-allowlist and --env)
+
+A worker's launch environment has two independent axes.
+`config/launch-env-allowlist` limits which ambient variables survive into the launch, and `fm-spawn.sh --env` names a file of variables to add.
+The allowlist is a home-wide filter; `--env` is a per-launch grant, and a crew dispatch profile can carry it as a standing rule.
+The two compose as filter-then-grant: the filter drops the ambient environment first, then the file is sourced inside the filtered launch, so a name the file sets does not need to appear in the allowlist and a name in both is set by the file.
+Neither option can silently defeat the other.
+
+### Ambient filter (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
 With no file, launch behavior is unchanged: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
@@ -383,6 +391,43 @@ Raw launch commands run under noninteractive POSIX `sh` with this option and mus
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+
+### Named environment file (--env)
+
+`fm-spawn.sh --env <path>` names one file of environment variables that the destination pane sources immediately before the worker command runs.
+It exists so a worker can be dispatched onto a gateway-routed or otherwise endpoint-redirected model as an ordinary guarded launch instead of a raw command.
+A crew dispatch profile carries the same axis as an optional `env` field, so it can be a standing rule; that schema is owned by "Crew dispatch profiles" below.
+
+The value is a path, never inline values, because these files hold live credentials.
+Firstmate validates the path and never opens the file, so its contents cannot reach the task's durable record, the launch command, the pane's visible history, or any log.
+Only the path is recorded, and a relaunch re-applies that recorded path rather than resolving a new one.
+The path must be absolute, because the destination pane resolves it rather than the invoking Firstmate process.
+A missing, unreadable, non-regular, or relative path stops the launch before any endpoint, local copy, or durable record exists, and a file that disappears between that check and the launch stops the launch rather than starting the worker without its environment.
+
+Write the file as shell assignments, one per line; `export` is optional because the launch sources it with allexport.
+The file is sourced, so it is shell: quote values that contain punctuation, and treat the file as code Firstmate runs on your behalf in that pane rather than as data it parses.
+Firstmate's own operational variables cannot be silently redefined by it; every other name the file sets is granted.
+
+```text
+# synthetic example, not a real endpoint or credential
+ANTHROPIC_BASE_URL=https://llm-gateway.internal.example/v1
+ANTHROPIC_AUTH_TOKEN='replace-me'
+```
+
+Firstmate does not check that the file actually redirects the endpoint, because that would mean reading its contents.
+A file that fails to route is surfaced by the worker's own first turn, not by a launch check.
+
+What the launch does check is the pairing.
+Claude serves a model id from its own native space: a short alias such as `opus` or `sonnet`, or a full `claude-*` name.
+An id carrying a routing qualifier instead - a provider or path segment such as `openai/gpt-5.6-luna`, a resource qualifier such as a Bedrock inference-profile ARN, or a vendor-dotted prefix such as `us.anthropic.claude-sonnet-5` - names a target Claude's default first-party endpoint cannot serve, and asking for one anyway does not fail: Claude answers from its own default model instead, with a success status and nothing on error output.
+A claude launch naming such a model therefore requires `--env` (or a profile `env` field) and is refused without one, on a fresh dispatch and on a relaunch alike.
+That check covers the launches Firstmate composes the model flag for; the raw launch-command escape hatch is not covered, because the command is the caller's own.
+It cannot tell a real first-party id from a plausible one, because Claude publishes no local catalog to check against.
+Other harnesses are unchanged: `opencode` names models as `<provider>/<id>` natively and has its own local catalog, `omp` and `cursor` already validate model ids against theirs, and the remaining adapters were not verified for this failure mode.
+Every runtime backend delivers the same launch text through one code path in `fm-spawn.sh`, so this axis is backend-independent.
+
+Like the ambient filter, this is not a sandbox: it cannot revoke same-user access to the file, and the pane's own shell startup may set variables of its own.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact flag, refusal, and launch mechanics.
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 

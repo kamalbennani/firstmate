@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness] [--model <name>] [--effort <level>] [--env <path>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness] [--model <name>] [--effort <level>] [--env <path>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness] [--model <name>] [--effort <level>] [--env <path>] [--backend <name>] --secondmate
+#        fm-spawn.sh <task-id> <project-dir> --raw <launch-command> --harness <recorded-name> --model <recorded-name> ...
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -37,7 +38,12 @@
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
 #   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   ordinary relaunch. With no flags at all it reproduces the recorded launch:
+#   an unchanged harness keeps the recorded model and effort rather than
+#   resetting them to that harness's own defaults, while an explicit harness
+#   change resets both, because axes chosen for one adapter do not transfer to
+#   another (the same rule bin/fm-control.sh applies on its side).
+#   It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
@@ -48,6 +54,62 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed.
+#   --env <path> names ONE launch environment file, sourced with allexport in the
+#   destination pane immediately before the harness command runs, so a worker can
+#   be dispatched onto a gateway-routed or otherwise endpoint-redirected model as
+#   an ordinary guarded launch instead of a raw command. It is a PATH, never
+#   inline values, because these files hold live credentials: fm-spawn validates
+#   the path and NEVER opens the file, so its contents cannot reach
+#   state/<id>.meta, the launch text, pane scrollback, or any log. Only the path
+#   is recorded (env=<path>), and config/crew-dispatch.json carries the same axis
+#   as an optional profile "env" field so it can be a standing rule
+#   (docs/configuration.md owns that schema). The path must be absolute, because
+#   it is resolved by the pane rather than by this process, and a missing,
+#   unreadable, or non-regular file refuses before any endpoint, worktree, or
+#   record exists. At launch the source is the first link of an && chain ahead of
+#   the whole launch command, so a file that disappears between validation and
+#   launch stops the launch instead of running the harness without its
+#   environment. Firstmate's own operational variables (GOTMPDIR, a ship or
+#   scout's FM_TASK_ID, and an enabled TRACEPARENT) are re-asserted after the
+#   source, and Firstmate's inline launch assignments already sit after it, so
+#   neither can be silently redefined by the file; every other name the file sets
+#   is granted. Composition with config/launch-env-allowlist is filter-then-grant:
+#   the source runs INSIDE the filtered `/usr/bin/env -i` payload, so a name the
+#   file sets does not need to appear in the allowlist, a name in both is set by
+#   the file, and neither option can silently defeat the other. A relaunch
+#   re-applies the recorded env= rather than re-resolving it and refuses when that
+#   file is no longer usable, so a relaunch either reproduces the original launch
+#   or stops; --env is refused alongside --relaunch and on a remote secondmate
+#   route, whose file would live on another host.
+#   MODEL/ENVIRONMENT GUARD. claude serves an id from its own documented native
+#   space: a short alias (opus, sonnet, fable, ...) or a full claude-* name
+#   (`claude --help`, Claude Code 2.1.263). An id carrying a routing qualifier
+#   instead - a provider or path segment (openai/gpt-5.6-luna), a resource
+#   qualifier (arn:aws:bedrock:...), or a vendor-dotted prefix
+#   (us.anthropic.claude-...) - names a target claude's default first-party
+#   endpoint cannot serve, and asking for one anyway does NOT fail: verified
+#   empirically 2026-09-07 on Claude Code 2.1.263, `claude -p --model
+#   openai/gpt-5.6-luna` answered from claude-sonnet-5 with is_error false, exit
+#   status 0, and nothing on stderr. A claude launch naming such a model
+#   therefore REQUIRES --env (or a profile env field) and refuses without one,
+#   on both the fresh and the relaunch path, rather than silently serving a
+#   different model. The guard covers the launches fm-spawn composes the model
+#   flag for; --raw is unguarded by construction because the command is the
+#   caller's own.
+#   --raw <launch-command> is the raw launch-command escape hatch for verifying an
+#   unverified adapter. It REQUIRES --harness <recorded-name> and --model
+#   <recorded-name>, because a raw command cannot be introspected and a stated
+#   record beats an inferred one: the recorded harness used to be the basename of
+#   the command's first word, which for a shell-wrapped command recorded
+#   meaningless values such as `harness=.`. The stated harness is a record only -
+#   any bare token is accepted, it selects no launch template and arms no
+#   per-harness wiring, and the control plane resolves it exactly as it resolves
+#   any recorded value (bin/fm-control-lib.sh), so an unverified name is refused
+#   there by design. --model default is an accepted explicit statement meaning no
+#   model was selected. A raw launch also records launch=raw, and a relaunch of
+#   such a task REFUSES: the command itself is never recorded (it could carry
+#   inline secrets), so it cannot be reproduced. --raw is refused with
+#   --relaunch and on a remote secondmate route.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -123,9 +185,9 @@
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp)
-#   overrides it for this spawn (either kind). A non-flag string containing
-#   whitespace is treated as a RAW launch command - the escape hatch for verifying
-#   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
+#   overrides it for this spawn (either kind). A harness argument containing
+#   whitespace is REFUSED: the raw launch-command escape hatch is --raw, below.
+#   For pi and pi-signed, fm-spawn resolves the selected executable
 #   name from PATH once, probes that concrete path with --help, and launches the
 #   same path. It adds --tui-mode regular only when that help advertises the flag;
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
@@ -226,6 +288,10 @@
 #   Names are read once per spawn; values are expanded in the destination pane,
 #   not copied from the invoking process or written into the launch text.
 #   Unset names stay unset and empty values stay empty.
+#   This filter composes with --env as filter-then-grant: /usr/bin/env -i drops
+#   the ambient environment first, and the --env file is then sourced INSIDE the
+#   resulting /bin/sh -c payload, so its names survive the filter without being
+#   listed here and a name in both is set by the file.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
@@ -304,6 +370,8 @@
 # data/backlog.md. An automatic-backend home with a backlog but no compatible
 # tasks-axi refuses before creating any lifecycle state.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# A launch carrying --env additionally records env=<path> (the path only, never
+# the file's contents), and a --raw launch records launch=raw.
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -359,6 +427,32 @@ resolve_directory_input() {
     return 1
   }
   printf '%s\n' "$resolved"
+}
+
+# resolve_env_file: validate ONE launch environment file path without ever
+# opening it. The path is all Firstmate is allowed to know: the file holds live
+# credentials, so its contents must never reach state/<id>.meta, the launch
+# text, pane scrollback, or a log, and the values are expanded by the
+# destination pane instead (see the header's --env contract). Absolute only,
+# because the pane resolves it rather than this process, and it must be a
+# readable regular file (symlinks to one are fine, a dangling symlink or a
+# directory is not). Every refusal names the path and nothing else.
+resolve_env_file() {  # <path>
+  local path=$1 raw_bytes
+  raw_bytes=$(fm_backlog_bytes_of_string "$path") || return 1
+  if ! fm_backlog_control_bytes_valid 0 "$raw_bytes"; then
+    echo "error: --env path contains an invalid control byte" >&2
+    return 1
+  fi
+  case "$path" in
+    /*) ;;
+    *) echo "error: --env must be an absolute path; the destination pane resolves it, not this process (got '$path')" >&2; return 1 ;;
+  esac
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+    echo "error: --env file is missing, unreadable, or not a regular file: $path" >&2
+    return 1
+  fi
+  printf '%s\n' "$path"
 }
 
 FM_HOME=$(resolve_directory_input FM_HOME "$FM_HOME") || exit 1
@@ -442,6 +536,8 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+ENV_FILE=
+RAW_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -449,6 +545,8 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+ENV_SET=0
+RAW_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -465,6 +563,8 @@ for a in "$@"; do
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
       traceparent) TRACEPARENT_ARG=$a; TRACEPARENT_SET=1 ;;
+      env) ENV_FILE=$a; ENV_SET=1 ;;
+      raw) RAW_ARG=$a; RAW_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -488,6 +588,10 @@ for a in "$@"; do
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --traceparent) want_value=traceparent ;;
     --traceparent=*) TRACEPARENT_ARG=${a#--traceparent=}; TRACEPARENT_SET=1 ;;
+    --env) want_value='env' ;;
+    --env=*) ENV_FILE=${a#--env=}; ENV_SET=1 ;;
+    --raw) want_value=raw ;;
+    --raw=*) RAW_ARG=${a#--raw=}; RAW_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -499,6 +603,8 @@ done
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || { echo "error: --mode requires a non-empty value" >&2; exit 1; }
 [ "$YOLO_SET" -eq 0 ] || [ -n "$YOLO" ] || { echo "error: --yolo requires a non-empty value" >&2; exit 1; }
 [ "$TRACEPARENT_SET" -eq 0 ] || [ -n "$TRACEPARENT_ARG" ] || { echo "error: --traceparent requires a non-empty value" >&2; exit 1; }
+[ "$ENV_SET" -eq 0 ] || [ -n "$ENV_FILE" ] || { echo "error: --env requires a non-empty value" >&2; exit 1; }
+[ "$RAW_SET" -eq 0 ] || [ -n "$RAW_ARG" ] || { echo "error: --raw requires a non-empty value" >&2; exit 1; }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -516,6 +622,46 @@ case "$EFFORT" in
   ''|low|medium|high|xhigh|max) ;;
   *) echo "error: --effort must be one of low, medium, high, xhigh, max" >&2; exit 1 ;;
 esac
+# The raw launch-command escape hatch is now an explicit flag rather than an
+# accident of whitespace, and it must STATE the record it cannot be introspected
+# for (see the header's --raw contract). A harness argument that still carries a
+# whitespace-separated command is refused rather than silently reinterpreted,
+# because the record it used to produce - the basename of the command's first
+# word - was routinely meaningless.
+if [ "$RAW_SET" -eq 1 ]; then
+  [ "$HARNESS_SET" -eq 1 ] || {
+    echo "error: --raw requires --harness <recorded-name>: a raw command cannot be introspected, so the harness recorded for it must be stated rather than inferred" >&2
+    exit 1
+  }
+  [ "$MODEL_SET" -eq 1 ] || {
+    echo "error: --raw requires --model <recorded-name>: state the model the command actually runs, or --model default when it selects none" >&2
+    exit 1
+  }
+  # The hatch is for adapters Firstmate has NOT verified. Naming an exactly
+  # verified one would publish a record claiming that adapter's full launch
+  # contract - its composed model and effort flags, its store forwarding, its
+  # pre-launch refusals - for a command Firstmate did not build, and the
+  # gateway case that used to need exactly that is now --env. A variant name
+  # such as claude-beta is deliberately still accepted: it resolves to the same
+  # control and wiring family by prefix without claiming to be the verified
+  # adapter itself.
+  if fm_control_harness_supported "$HARNESS_ARG"; then
+    echo "error: --raw cannot name the verified adapter '$HARNESS_ARG'; launch it normally so its verified launch contract applies, adding --env <path> when it needs a different launch environment, or state a variant name for a genuinely unverified command" >&2
+    exit 1
+  fi
+fi
+case "$HARNESS_ARG" in
+  *[[:space:]]*)
+    echo "error: --harness takes one adapter or recorded name, not a launch command; pass the command as --raw <launch-command> with --harness <recorded-name> and --model <recorded-name>" >&2
+    exit 1
+    ;;
+esac
+# A relaunch's environment comes from the record, so an --env flag there is a
+# flag contradiction rather than a bad path; that refusal lives with the other
+# relaunch contradictions below and must reach the caller first.
+if [ "$ENV_SET" -eq 1 ] && [ "$RELAUNCH" -eq 0 ]; then
+  ENV_FILE=$(resolve_env_file "$ENV_FILE") || exit 1
+fi
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -526,6 +672,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ "$KIND_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded kind; --scout/--secondmate cannot override it" >&2; exit 1; }
   [ "$MODE_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded delivery mode; --mode cannot override it" >&2; exit 1; }
   [ "$YOLO_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded yolo posture; --yolo cannot override it" >&2; exit 1; }
+  [ "$ENV_SET" -eq 0 ] || { echo "error: --relaunch reuses the task's recorded launch environment; --env cannot override it" >&2; exit 1; }
+  [ "$RAW_SET" -eq 0 ] || { echo "error: --relaunch launches from the task's own record; a raw command cannot be reproduced from it, so --raw is refused" >&2; exit 1; }
 else
   # Delivery contract (AGENTS.md section 7). A ship task's mode and yolo are
   # firstmate's per-task decision, so they are required and closed-set validated
@@ -570,6 +718,13 @@ spawn_remote_secondmate() {
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || { echo "error: invalid task id" >&2; return 2; }
+  # A launch environment file is validated and sourced where the agent runs, so
+  # a path resolved on THIS machine says nothing about the remote host; a raw
+  # command is refused on this route already, below.
+  if [ "$ENV_SET" -eq 1 ] && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$id" remote 2>/dev/null || true)" = 1 ]; then
+    echo "error: --env names a path on this machine, which a remote secondmate route cannot resolve; configure that host's own launch environment instead" >&2
+    return 1
+  fi
   mkdir -p "$STATE" || { echo "error: could not create parent state directory" >&2; return 1; }
   SPAWN_TASK_LOCK="$STATE/.spawn-$id.lock"
   if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
@@ -1089,6 +1244,8 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
+  [ -z "$ENV_FILE" ] || shared_args+=(--env "$ENV_FILE")
+  [ -z "$RAW_ARG" ] || shared_args+=(--raw "$RAW_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
   # spanning several modes is two invocations rather than a silent mixed dispatch.
@@ -1274,6 +1431,46 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  # A raw launch's command is deliberately never recorded (it could carry inline
+  # secrets), so it cannot be reproduced. Refusing is the only honest option: a
+  # relaunch must either reproduce the original launch or stop, never quietly
+  # launch the canonical adapter the stated name happens to match.
+  [ "$(fm_meta_get "$RELAUNCH_META" launch)" != raw ] || {
+    echo "error: task $ID was launched from a raw command, which is not recorded and cannot be reproduced; tear the task down and dispatch it again rather than relaunching onto a different launch" >&2
+    exit 1
+  }
+  # The recorded launch environment is re-applied, never re-resolved: the model
+  # this task records may only be servable with it, so a relaunch reproduces the
+  # original launch or refuses.
+  ENV_FILE=$(fm_meta_get "$RELAUNCH_META" env)
+  if [ -n "$ENV_FILE" ]; then
+    ENV_FILE=$(resolve_env_file "$ENV_FILE") || {
+      echo "error: task $ID records a launch environment file that is no longer usable, so a relaunch cannot reproduce the environment its recorded model needs; restore that file or dispatch the task again" >&2
+      exit 1
+    }
+  fi
+  # Model and effort follow the same rule the harness axis follows just below,
+  # and the same rule bin/fm-control.sh applies on its side: an UNCHANGED
+  # harness keeps this task's recorded axes, while an explicit harness change
+  # resets them, because a model or effort chosen for one adapter does not
+  # transfer to another. Without this, a direct relaunch with no flags recorded
+  # model=default and launched the harness's own default - a different model
+  # than the record it was launched from, which is exactly what a relaunch must
+  # never do quietly. fm-control passes the axes it decided to keep explicitly,
+  # so its harness-switch reset (no --model, new --harness) still resets here.
+  if [ -z "$HARNESS_ARG" ] || [ "$HARNESS_ARG" = "$RELAUNCH_PRIOR_HARNESS" ]; then
+    if [ "$MODEL_SET" -eq 0 ]; then
+      RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+      [ -z "$RELAUNCH_PRIOR_MODEL" ] || [ "$RELAUNCH_PRIOR_MODEL" = default ] \
+        || MODEL=$RELAUNCH_PRIOR_MODEL
+    fi
+    if [ "$EFFORT_SET" -eq 0 ]; then
+      RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+      case "$RELAUNCH_PRIOR_EFFORT" in
+        low|medium|high|xhigh|max) EFFORT=$RELAUNCH_PRIOR_EFFORT ;;
+      esac
+    fi
+  fi
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -1332,7 +1529,21 @@ else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi
+POSITIONAL_HARNESS=$ARG3
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+# The positional harness arg is a bare adapter name too. A whitespace-separated
+# command there used to become a raw launch by accident; it is now refused with
+# the same pointer as the --harness form, so the escape hatch is always explicit.
+case "$ARG3" in
+  *[[:space:]]*)
+    echo "error: the harness argument takes one adapter or recorded name, not a launch command; pass the command as --raw <launch-command> with --harness <recorded-name> and --model <recorded-name>" >&2
+    exit 1
+    ;;
+esac
+if [ "$RAW_SET" -eq 1 ] && [ -n "$POSITIONAL_HARNESS" ]; then
+  echo "error: --raw carries the launch command; drop the positional harness argument and state the record with --harness <recorded-name>" >&2
+  exit 1
+fi
 
 shell_quote() {
   printf "'"
@@ -1388,6 +1599,43 @@ omp_model_validate() {  # <omp-bin> <model>
   fi
   echo "error: omp model '$model' is not listed by 'omp models --json' although provider '$provider' is; choose a listed <provider>/<id> or omit --model" >&2
   return 1
+}
+
+# claude pre-launch model/environment guard, the counterpart to
+# omp_model_validate above for the one harness with no local model catalog to
+# validate against.
+#
+# claude's own --help (Claude Code 2.1.263) documents its native id space as a
+# short alias for the latest model - fable, opus, sonnet - or a model's full
+# name, claude-fable-5. An id carrying a ROUTING QUALIFIER instead names a
+# target claude's default first-party endpoint cannot serve: a provider or path
+# segment (openai/gpt-5.6-luna), a resource qualifier
+# (arn:aws:bedrock:...:inference-profile/...), or a vendor-dotted prefix
+# (us.anthropic.claude-sonnet-5, which needs CLAUDE_CODE_USE_BEDROCK). The
+# qualifier test rather than a bare slash test is what puts the dotted Bedrock
+# id on the correct side by construction instead of by accident.
+#
+# Asking for such an id anyway does not fail. Verified empirically 2026-09-07 on
+# Claude Code 2.1.263: `claude -p 'Say OK' --model openai/gpt-5.6-luna
+# --output-format json` answered from modelUsage claude-sonnet-5 with
+# canonicalModel claude-sonnet-5, provider firstParty, is_error false, exit
+# status 0, and nothing on stderr. That silent substitution is the reason a
+# claude launch naming a qualified id REQUIRES an explicit launch environment
+# (--env, or a crew-dispatch profile env field) and refuses without one.
+#
+# What this does NOT claim: it cannot tell a real first-party id from a
+# plausible one, because claude publishes no local catalog to check against, so
+# a misspelled claude-* name still reaches the same silent fallback. The guard
+# covers exactly the class an environment grant is the fix for.
+claude_model_needs_launch_environment() {  # <model>
+  local model=$1
+  [ -n "$model" ] && [ "$model" != default ] || return 1
+  case "$model" in
+    */*|*:*) return 0 ;;
+    claude*) return 1 ;;
+    *.*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # The verified launch command per adapter. The knowledge half of each adapter
@@ -1566,16 +1814,19 @@ launch_template() {
   esac
 }
 
-case "$ARG3" in
-  *' '*)  # raw launch command (unverified-adapter escape hatch)
-    RAW_LAUNCH=1
-    LAUNCH=$ARG3
-    HARNESS=""
-    for word in $LAUNCH; do
-      case "$word" in [A-Za-z_]*=*) continue ;; *) HARNESS=$(basename "$word"); break ;; esac
-    done
-    ;;
-  '')
+if [ "$RAW_SET" -eq 1 ]; then
+  # The raw escape hatch: the caller's own command, launched verbatim. The
+  # recorded harness and model are the caller's STATEMENTS (both required above),
+  # never introspected from the command, and the stated name selects no launch
+  # template and arms no per-harness wiring - a raw launch is unwired by
+  # construction, which is also why launch=raw refuses a later relaunch.
+  RAW_LAUNCH=1
+  LAUNCH=$RAW_ARG
+  HARNESS=$HARNESS_ARG
+fi
+case "${RAW_LAUNCH}:${ARG3}" in
+  1:*) ;;
+  0:'')
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
     # every other kind uses the crew harness only when no dispatch profile file is
@@ -1595,11 +1846,11 @@ case "$ARG3" in
       HARNESS=$("$FM_ROOT/bin/fm-harness.sh" crew)
       harness_src='config/crew-harness'
     fi
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass --raw <launch-command> with --harness and --model to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
     HARNESS=$ARG3
-    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
+    LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass --raw <launch-command> with --harness and --model to use an unverified adapter" >&2; exit 1; }
     ;;
 esac
 
@@ -1692,6 +1943,17 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
 fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
+fi
+# Fires on the fresh and the relaunch path alike: a relaunch re-applies the
+# recorded env=, so a task that was launched with one still passes, and a
+# relaunch that moves an existing task onto a qualified model without one is
+# refused here rather than launching a different model than it records.
+# Deliberately not applied to a --raw launch: fm-spawn does not compose that
+# command's model flag, so it has nothing to guard (see the header).
+if [ "$RAW_LAUNCH" -eq 0 ] && [ "$HARNESS" = claude ] && [ -z "$ENV_FILE" ] \
+   && claude_model_needs_launch_environment "$MODEL"; then
+  echo "error: claude model '$MODEL' carries a routing qualifier, so claude's default first-party endpoint cannot serve it - and claude does not fail on it, it silently answers from its own default model instead (verified: --model openai/gpt-5.6-luna served claude-sonnet-5 with exit status 0). Pass --env <path> naming the launch environment that serves this model, or use a first-party alias or claude-* id." >&2
+  exit 1
 fi
 
 secondmate_registry_value() {
@@ -3552,7 +3814,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort env launch busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -3570,6 +3832,16 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # The PATH only. The file's contents are never read by this process, so they
+  # cannot reach this record; a relaunch re-applies this value rather than
+  # re-resolving it, which is what lets a recorded model stay reproducible.
+  # Written from $ENV_FILE on both paths - on a relaunch that value came from
+  # this same field - so it is preserved rather than silently dropped.
+  [ -z "$ENV_FILE" ] || echo "env=$ENV_FILE"
+  # A raw launch is not reproducible from this record: the command itself is
+  # deliberately absent. The marker is what makes a later relaunch refuse
+  # instead of launching the canonical adapter the stated harness resembles.
+  [ "$RAW_LAUNCH" -eq 0 ] || echo "launch=raw"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -3827,6 +4099,60 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
     fi
     LAUNCH="unset TRACEPARENT; $LAUNCH"
   fi
+fi
+# --env: source the caller's launch environment file in the DESTINATION pane,
+# immediately before the launch command, and nowhere else. Only the quoted path
+# enters the launch text, so the file's contents never reach this process, this
+# task's record, the pane's scrollback, or a log; `set -a` around the source is
+# what exports plain NAME=value lines as well as explicit `export` lines.
+#
+# Three properties this exact shape buys, each verified empirically on
+# 2026-09-07 in a real tmux pane:
+#   1. Fail-closed. The source is the first link of an && chain covering the
+#      whole launch, so a file that vanished since validation stops the launch
+#      instead of running the harness without its environment.
+#   2. No extra process. The chain runs in the pane's own shell and the launch
+#      command is its last member, so with no allowlist the process tree is
+#      shape-identical to a native launch - measured: pane shell plus the
+#      harness, two processes with the worktree as cwd, same foreground process
+#      group, with or without --env. Under config/launch-env-allowlist the
+#      payload's `/bin/sh` is retained rather than exec-optimized away, three
+#      processes - but that is already true of every compound payload that path
+#      produces today, a relaunch's `unset TRACEPARENT;` prefix included, so
+#      --env still adds nothing. Either way the agent-state classifier reads the
+#      same verdict from the same foreground group, and teardown's
+#      leaked-process reaper (bin/fm-teardown.sh) sees the same set it would see
+#      for a native launch. For comparison, the shell-wrapped raw command this
+#      flag replaces measured one process more.
+#   3. Firstmate's operational variables cannot be silently redefined. They are
+#      re-asserted after the source; the pane exports sent before the launch
+#      would otherwise be overridable by the file, and FM_TASK_ID in particular
+#      gates bin/fm-test-run.sh's primary-checkout refusal. Firstmate's inline
+#      launch assignments already win by sitting after the source.
+# The brace group is required rather than cosmetic: $LAUNCH is not always one
+# simple command (a relaunch prepends `unset TRACEPARENT; `), and without it the
+# && chain would cover only the first statement and the launch would run even
+# when the source failed.
+#
+# Like every launch this script composes, the prologue is POSIX/bash/zsh command
+# syntax read by the pane's own shell - the same assumption the existing
+# assignment prefixes and $(...) substitutions in launch_template already make.
+# It is verified in tests against sh, bash, and zsh for every harness this
+# script can build a launch for.
+#
+# Placed ahead of the allowlist wrap below on purpose: that wrap puts everything
+# here INSIDE its `/usr/bin/env -i ... /bin/sh -c` payload, which is what makes
+# the two options compose as filter-then-grant instead of the filter stripping
+# what the file just granted.
+if [ -n "$ENV_FILE" ]; then
+  LAUNCH_ENV_REASSERT="export GOTMPDIR=$(shell_quote "$TASK_TMP/gotmp")"
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    LAUNCH_ENV_REASSERT="$LAUNCH_ENV_REASSERT FM_TASK_ID=$(shell_quote "$ID")"
+  fi
+  if [ -n "$SPAWN_TRACEPARENT" ]; then
+    LAUNCH_ENV_REASSERT="$LAUNCH_ENV_REASSERT TRACEPARENT=$(shell_quote "$SPAWN_TRACEPARENT")"
+  fi
+  LAUNCH="set -a; . $(shell_quote "$ENV_FILE") && set +a && $LAUNCH_ENV_REASSERT && { $LAUNCH; }"
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
