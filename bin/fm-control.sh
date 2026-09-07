@@ -233,7 +233,7 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
-    --env) control_want_value=env ;;
+    --env) control_want_value='env' ;;
     --env=*) NEW_ENV=${control_arg#--env=}; ENV_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
