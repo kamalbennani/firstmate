@@ -1444,18 +1444,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID was launched from a raw command, which is not recorded and cannot be reproduced; tear the task down and dispatch it again rather than relaunching onto a different launch" >&2
     exit 1
   }
-  # A same-harness relaunch re-applies the recorded env=, never re-resolving it:
-  # the model this task records may only be servable with it, so it reproduces
-  # the original launch or refuses. A harness-switching relaunch instead resets
-  # env exactly as it resets model and effort just below, because a launch
-  # environment built for one adapter is not proven for another; an explicit
-  # --env on that same relaunch command re-supplies it.
+  # A same-harness relaunch re-applies the recorded env=, never re-resolving a
+  # DIFFERENT one: the model this task records may only be servable with it, so
+  # it reproduces the original launch or refuses. A harness-switching relaunch
+  # instead resets env exactly as it resets model and effort just below,
+  # because a launch environment built for one adapter is not proven for
+  # another; an explicit --env on that same relaunch command re-supplies it.
+  #
+  # bin/fm-control.sh passes this reproduced value back as --env explicitly
+  # (the same rule it already applies to model and effort), so a matching
+  # --env here is that reproduction, not an override, and is accepted; only a
+  # DIFFERING --env is refused as an override attempt.
   if [ -z "$HARNESS_ARG" ] || [ "$HARNESS_ARG" = "$RELAUNCH_PRIOR_HARNESS" ]; then
-    [ "$ENV_SET" -eq 0 ] || {
+    RELAUNCH_PRIOR_ENV=$(fm_meta_get "$RELAUNCH_META" env)
+    if [ "$ENV_SET" -eq 1 ] && [ "$ENV_FILE" != "$RELAUNCH_PRIOR_ENV" ]; then
       echo "error: --relaunch reuses the task's recorded launch environment; --env cannot override it" >&2
       exit 1
-    }
-    ENV_FILE=$(fm_meta_get "$RELAUNCH_META" env)
+    fi
+    ENV_FILE=$RELAUNCH_PRIOR_ENV
     if [ -n "$ENV_FILE" ]; then
       ENV_FILE=$(resolve_env_file "$ENV_FILE") || {
         echo "error: task $ID records a launch environment file that is no longer usable, so a relaunch cannot reproduce the environment its recorded model needs; restore that file or dispatch the task again" >&2

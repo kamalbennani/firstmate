@@ -918,13 +918,18 @@ do_relaunch() {
   # stated rather than implied by an omitted flag.
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS"
     --model "$TARGET_MODEL" --effort "$TARGET_EFFORT")
-  # Unlike model/effort, env is never passed when it is merely being carried
-  # forward: the launch owner already reproduces a same-harness relaunch's
-  # recorded env= on its own and refuses an --env that tries to override it.
-  # --env is only ever passed here for an explicit re-supply on a harness
-  # switch (resolve_relaunch_profile's die guard ensures ENV_SET=1 implies
-  # exactly that case).
-  [ "$ENV_SET" = 0 ] || spawn_args+=(--env "$TARGET_ENV")
+  # env follows model/effort here too: TARGET_ENV is passed EXPLICITLY whenever
+  # it is non-empty, whether it is a same-harness carry-forward or an explicit
+  # harness-switch re-supply. Passing nothing on carry-forward would leave the
+  # launch owner to re-derive and re-validate the recorded value on its own,
+  # entirely on the post-stop side of the transaction, with no way for it to
+  # know this same value already cleared recheck_target_env above - exactly
+  # the asymmetry model/effort's explicit-pass-through avoids. The launch
+  # owner still refuses an --env that DIFFERS from its own record (a same-
+  # harness relaunch cannot override it), so passing the value this
+  # transaction already resolved is accepted as the reproduction it is,
+  # never as an override.
+  [ -z "$TARGET_ENV" ] || spawn_args+=(--env "$TARGET_ENV")
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
