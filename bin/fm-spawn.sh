@@ -666,7 +666,16 @@ esac
 # A relaunch's environment comes from the record, so an --env flag there is a
 # flag contradiction rather than a bad path; that refusal lives with the other
 # relaunch contradictions below and must reach the caller first.
-if [ "$ENV_SET" -eq 1 ] && [ "$RELAUNCH" -eq 0 ]; then
+#
+# A --secondmate spawn defers this resolution: whether the route is local or
+# remote is not known until spawn_remote_secondmate below has consulted the
+# secondmates registry, and a path resolved on THIS machine says nothing
+# about a remote host. Resolving here would run ahead of that route check and
+# turn its --env refusal into dead code, firing this generic "missing" error
+# for a path that is only meant to exist on the remote host. The local branch
+# below resolves it once the route is known to be local (or absent from the
+# registry).
+if [ "$ENV_SET" -eq 1 ] && [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   ENV_FILE=$(resolve_env_file "$ENV_FILE") || exit 1
 fi
 
@@ -1354,6 +1363,13 @@ if [ "$KIND" = secondmate ]; then
     remote_spawn_rc=$?
   fi
   [ "$remote_spawn_rc" -eq 3 ] || exit "$remote_spawn_rc"
+fi
+# The route is now known to be local (spawn_remote_secondmate above either
+# launched remotely and exited, refused, or returned 3 for "not a remote
+# secondmate"), so an --env path is resolved against this machine's
+# filesystem, matching the deferral above.
+if [ "$ENV_SET" -eq 1 ] && [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = secondmate ]; then
+  ENV_FILE=$(resolve_env_file "$ENV_FILE") || exit 1
 fi
 # Backend selection (data/fm-backend-design-d7): explicit --backend, else
 # FM_BACKEND env, else config/backend, else runtime auto-detection, else

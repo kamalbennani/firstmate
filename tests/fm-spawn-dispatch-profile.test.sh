@@ -1297,6 +1297,27 @@ test_launch_env_file_invalid_path_refuses_before_any_task_state() {
   pass "a missing, relative, non-regular, dangling, or unreadable --env path refuses before any task state exists"
 }
 
+test_remote_secondmate_env_route_refuses_before_local_env_resolution() {
+  local rec id out status envfile
+  id=profile-remote-secondmate-env-z9c
+  rec=$(make_spawn_case "$id" codex "$id")
+  read_case_record "$rec"
+  envfile="$CASE_DIR/only-on-remote-host.env"
+
+  printf -- '- %s - remote fixture (host: remote-host; root: %s; home: %s; scope: remote work; projects: ; added 2026-09-05)\n' \
+    "$id" "$CASE_DIR/remote-root" "$CASE_DIR/remote-home" > "$HOME_DIR/data/secondmates.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" --secondmate --env "$envfile")
+  status=$?
+  expect_code 1 "$status" "a remote secondmate route with --env should refuse: $out"
+  assert_contains "$out" "remote secondmate route cannot resolve" \
+    "the refusal must name the remote-route reason, not report the path missing on the primary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused remote-route --env spawn delivered a launch command"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused remote-route --env spawn published a task record"
+  pass "a remote secondmate route refuses --env before resolving the path against this machine"
+}
+
 # --- the model/environment guard (the 2026-09-01 silent-fallback class) ------
 #
 # Reproduced on Claude Code 2.1.263 while this was written: `claude -p --model
@@ -1420,6 +1441,7 @@ test_launch_env_file_wraps_every_harness_launch_validly
 test_launch_env_file_path_survives_shell_quoting
 test_launch_env_file_fail_closed_when_removed_after_validation
 test_launch_env_file_invalid_path_refuses_before_any_task_state
+test_remote_secondmate_env_route_refuses_before_local_env_resolution
 test_claude_qualified_model_requires_a_launch_environment
 test_raw_launch_requires_stated_harness_and_model
 
