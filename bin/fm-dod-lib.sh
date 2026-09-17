@@ -23,7 +23,10 @@
 # stdout with no trailing blank line. The caller validates the mode; an unknown
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
-# line that bin/fm-spawn.sh checks a ship brief against.
+# line, so fm_brief_without_dod's stripping and any legacy or promoted brief's
+# embedded copy are recognized by the same pattern; bin/fm-brief.sh writes that
+# line separately at the top of a freshly scaffolded ship brief, which is what
+# bin/fm-spawn.sh checks against its own explicit --mode before launching.
 # The two PR-based blocks require a non-draft pull request before the done
 # report, read back from the forge; a lane that deliberately holds a draft
 # declares a paused wait instead. bin/fm-pr-check.sh refuses to arm merge
