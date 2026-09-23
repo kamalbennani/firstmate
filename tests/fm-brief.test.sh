@@ -340,6 +340,8 @@ test_pr_based_dod_requires_non_draft() {
     FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$mode: brief was not scaffolded"
+    printf '\n' >> "$brief"
+    fm_dod_block "$mode" "$id" >> "$brief"
     if [ "$mode" = local-only ]; then
       assert_no_grep "isDraft" "$brief" "$mode: a branch-only delivery must not require a non-draft PR"
       continue
