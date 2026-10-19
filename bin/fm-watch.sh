@@ -2493,9 +2493,12 @@ stale_wait_throttled() {  # <window-key> <declaration>
 # 0 when this poll's full classification of an already pause-tracked window is
 # provably silent, so the pane capture that classification would spend can be
 # skipped. <last> is the status file's declared-wait line, already read by the
-# caller and verified paused-or-captain-held. The mirror is exact: with a live
-# paused declaration every reachable branch ends in handle_paused_stale or a
-# bookkeeping-only clear, and handle_paused_stale wakes only through
+# caller and verified paused-or-captain-held. The caller admits only an ordinary
+# crew whose agent reads confidently dead, so no busy spell the full path would
+# act on can hide behind the skipped capture. Under that gate the mirror is
+# exact: with a live paused declaration every reachable branch ends in
+# handle_paused_stale or a bookkeeping-only clear, and handle_paused_stale wakes
+# only through
 # resurface_absorbed, which stays silent while the re-surface throttle is fresh
 # and scoped to the declaration it would compute this poll - including its
 # `:due` form once a declared until-time passes, and the until-future young
@@ -3863,9 +3866,12 @@ EOF
     # skip the capture - the per-poll cost that made a long parked pass outlast
     # the beacon grace. The recheck marker bounds the skip to the same
     # STALE_ESCALATE_SECS cadence pause_state_class already owns for
-    # re-verifying a paused classification, and an ordinary crew must still
-    # read confidently dead, as that cached classification itself requires, so
-    # an agent relaunched in a parked pane takes the full path on sight. Afk
+    # re-verifying a paused classification, and the crew must still read
+    # confidently dead, as that cached classification itself requires, so an
+    # agent relaunched in a parked pane takes the full path on sight. A
+    # secondmate always takes the full path: its endpoint liveness is never
+    # read, so only its pane can show a busy spell, and the busy branch must see
+    # that spell to clear the re-surface throttle exactly as it does today. Afk
     # mode is excluded because the away-mode daemon owns triage and reads every
     # pane itself, and any residual wedge state takes the full path so the
     # unchanged-hash fallback discards it on sight exactly as before.
@@ -3874,8 +3880,8 @@ EOF
       && [ -e "$STATE/.paused-rechecked-$key" ] \
       && [ "$(age_of "$STATE/.paused-rechecked-$key")" -lt "$STALE_ESCALATE_SECS" ] \
       && [ ! -e "$STATE/.stale-since-$key" ] && [ ! -e "$STATE/.wedge-escalations-$key" ] \
-      && { [ "$kind" = secondmate ] \
-        || [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null)" = dead ]; } \
+      && [ "$kind" != secondmate ] \
+      && [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null)" = dead ] \
       && paused_stale_silent_this_poll "$key" "$STATE/$task.status" "$last"; then
       continue
     fi

@@ -6913,6 +6913,51 @@ test_paused_recheck_skips_the_pane_capture() {
   pass "an already-paused window skips the pane capture between rechecks, and the recheck cadence still fires"
 }
 
+# A secondmate's endpoint liveness is never read, so only its pane can show
+# that a parked mate went back to work; the skip must leave it on the full path.
+# Within a fresh recheck window the pane is still captured, and once it reads
+# busy the busy branch clears the re-surface throttle so the next quiet spell
+# re-surfaces the wait instead of riding the old throttle.
+test_paused_secondmate_keeps_the_pane_capture() {
+  local dir state fakebin out capture_file count_file window key pid captures i
+  dir=$(make_case paused-secondmate-capture); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
+  window="test:fm-mate-held"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  printf 'idle, holding for upstream' > "$capture_file"
+  make_slow_capture_tmux "$fakebin"
+  prime_paused_window "$state" mate "$window" "$capture_file" 0
+  printf 'window=%s\nkind=secondmate\nharness=pi\n' "$window" > "$state/mate.meta"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher exited on a paused secondmate: $(cat "$out")"; }
+  captures=$(cat "$count_file" 2>/dev/null || echo 0)
+  [ "$captures" -ge 1 ] || { reap "$pid"; fail "a paused secondmate inside its recheck window skipped the pane capture"; }
+  [ -e "$state/.paused-resurfaced-$key" ] || { reap "$pid"; fail "an idle paused secondmate lost its re-surface throttle"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "an idle paused secondmate under a fresh throttle enqueued a wake"; }
+  # The mate goes back to work while its status still says paused: the busy
+  # branch must see it and drop the throttle, as on the full path.
+  record_pi_busy "$state" mate
+  i=0
+  while [ "$i" -lt 100 ]; do
+    kill -0 "$pid" 2>/dev/null || { reap "$pid"; fail "watcher exited on a busy paused secondmate: $(cat "$out")"; }
+    [ -e "$state/.paused-resurfaced-$key" ] || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ ! -e "$state/.paused-resurfaced-$key" ] \
+    || { reap "$pid"; fail "a busy paused secondmate kept its re-surface throttle"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a busy paused secondmate printed a wake reason: $(cat "$out")"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a paused secondmate keeps its pane capture, so a busy spell clears the re-surface throttle"
+}
+
 # The skip must never swallow a re-surface the full path would raise: once a
 # declared until-time passes, the throttle bound to the plain declaration no
 # longer covers the `:due` recheck, so the window pays the capture and the
@@ -7531,6 +7576,7 @@ test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_beat_advances_within_a_long_parked_pass
 test_paused_recheck_skips_the_pane_capture
+test_paused_secondmate_keeps_the_pane_capture
 test_paused_skip_still_reads_a_due_window
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
