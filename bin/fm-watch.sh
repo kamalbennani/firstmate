@@ -295,6 +295,11 @@ POLL=${FM_POLL:-15}                   # seconds between cycles
 # derivation - see docs/turnend-guard.md "Guard grace and the poll cadence".
 # This recomputes the library default above now that the real configured
 # POLL is known.
+# Inside one cycle, watcher_midpass_beat also advances the beacon once it is
+# this many seconds old, so a pass absorbing many slow windows keeps proving
+# progress well inside the grace; a short pass never reaches it, so the beacon
+# still moves only at the cycle boundary there.
+MIDPASS_BEAT_SECS=${FM_MIDPASS_BEAT_SECS:-30}
 WATCHER_STALE_GRACE=${FM_WATCHER_STALE_GRACE:-${FM_GUARD_GRACE:-$(fm_poll_derived_grace "$POLL")}}
 # Hard bound on a live holder's beacon age. Under it a re-arm refuses and asks
 # for inspection (the grace above); at or past it the re-arm evicts the holder
@@ -3429,11 +3434,15 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
-# watcher_beat: advance the liveness beacon mid-pass. Called between units of
-# bounded work inside one poll (per recorded window, per registered check), so
-# a long pass through many parked tasks keeps the beacon fresh while a watcher
-# wedged inside any single unit still stops beating and reads stale.
-watcher_beat() { touch "$STATE/.last-watcher-beat"; }
+# watcher_midpass_beat: advance the liveness beacon mid-pass once it is
+# MIDPASS_BEAT_SECS old. Called between units of bounded work inside one poll
+# (per recorded window, per registered check), so a long pass through many
+# parked tasks keeps the beacon fresh while a watcher wedged inside any single
+# unit still stops beating and reads stale.
+watcher_midpass_beat() {
+  [ "$(age_of "$STATE/.last-watcher-beat")" -lt "$MIDPASS_BEAT_SECS" ] \
+    || touch "$STATE/.last-watcher-beat"
+}
 
 while :; do
   # Home-gone exit: a deleted home, state directory, or code root means this
@@ -3474,11 +3483,11 @@ while :; do
   # The top-of-poll touch alone cannot keep the beacon fresh when one pass
   # absorbs many parked tasks in sequence - each pane capture costs seconds, so
   # enough of them outlast the re-arm grace and a live, progressing watcher
-  # reads dead (the Stop-hook auto-arm then refuses or evicts it). watcher_beat
-  # therefore also advances the beacon between units of bounded work inside the
-  # pass; a watcher wedged INSIDE one capture or one check still stops beating
-  # and is detected exactly as before.
-  watcher_beat
+  # reads dead (the Stop-hook auto-arm then refuses or evicts it).
+  # watcher_midpass_beat therefore also advances the beacon between units of
+  # bounded work inside the pass; a watcher wedged INSIDE one capture or one
+  # check still stops beating and is detected exactly as before.
+  touch "$STATE/.last-watcher-beat"
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -3568,7 +3577,7 @@ while :; do
       [ -e "$c" ] || continue
       # A registered check can cost a network round-trip; keep the beacon
       # honest between checks so a long batch cannot read as a stalled watcher.
-      watcher_beat
+      watcher_midpass_beat
       is_pr_poll=0
       if [ "$(basename "$c")" = x-watch.check.sh ]; then
         if fmx_poll_shim_valid "$c" "$FM_HOME" "$FM_ROOT" \
@@ -3823,6 +3832,11 @@ EOF
   # remembers the hash already classified, or the declaration a busy pane's
   # crossed turn bound already handed to the away-mode daemon).
   while IFS= read -r w; do
+    # One pass can absorb many parked tasks in sequence, each costing seconds
+    # of pane read and crew-state verdict; advancing the beacon per window keeps
+    # a live, progressing watcher from reading stale to the re-arm grace, while
+    # a watcher wedged inside one window's work still stops beating.
+    watcher_midpass_beat
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     # Steering-inbox loss detection runs before the secondmate stale
@@ -3849,23 +3863,23 @@ EOF
     # skip the capture - the per-poll cost that made a long parked pass outlast
     # the beacon grace. The recheck marker bounds the skip to the same
     # STALE_ESCALATE_SECS cadence pause_state_class already owns for
-    # re-verifying a paused classification, afk mode is excluded because the
-    # away-mode daemon owns triage and reads every pane itself, and any
-    # residual wedge state takes the full path so the unchanged-hash fallback
-    # discards it on sight exactly as before.
+    # re-verifying a paused classification, and an ordinary crew must still
+    # read confidently dead, as that cached classification itself requires, so
+    # an agent relaunched in a parked pane takes the full path on sight. Afk
+    # mode is excluded because the away-mode daemon owns triage and reads every
+    # pane itself, and any residual wedge state takes the full path so the
+    # unchanged-hash fallback discards it on sight exactly as before.
     if ! afk_present && [ -e "$STATE/.paused-$key" ] \
       && status_is_paused_or_captain_held "$last" \
       && [ -e "$STATE/.paused-rechecked-$key" ] \
       && [ "$(age_of "$STATE/.paused-rechecked-$key")" -lt "$STALE_ESCALATE_SECS" ] \
       && [ ! -e "$STATE/.stale-since-$key" ] && [ ! -e "$STATE/.wedge-escalations-$key" ] \
+      && { [ "$kind" = secondmate ] \
+        || [ "$(fm_backend_agent_alive "$(window_backend "$w")" "$w" 2>/dev/null)" = dead ]; } \
       && paused_stale_silent_this_poll "$key" "$STATE/$task.status" "$last"; then
       continue
     fi
-    # One pass can absorb many parked tasks in sequence, each capture costing
-    # seconds; the beacon is advanced after each window's read below, so a
-    # live, progressing watcher never reads stale to the re-arm grace, while a
-    # watcher wedged inside one read still stops beating and is detected.
-    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || { watcher_beat; continue; }
+    watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || continue
     tail40=$WATCHER_CAPTURE
     # The matcher is already defined in this shell. It reads the capture this
     # poll already takes, and a miss drops a name the away daemon saved.
@@ -4088,9 +4102,6 @@ EOF
         clear_pause_tracking "$key"
       fi
     fi
-    # The window's read and classification are complete; advance the beacon so
-    # a long pass through many recorded windows keeps proving progress.
-    watcher_beat
   done < <(recorded_windows)
 
   # Heartbeat: the watcher runs a cheap fleet-scan at a regular cadence no matter

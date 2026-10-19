@@ -6797,29 +6797,31 @@ prime_paused_window() {  # <state> <id> <window> <capture-file> <recheck-age>
 # Stop-owned auto-arm declared a live, progressing watcher dead. The beacon must
 # advance BETWEEN windows inside the pass, not only at the pass boundary.
 test_beat_advances_within_a_long_parked_pass() {
-  local dir state fakebin out capture_file pid first_beat mid_beat i
+  local dir state fakebin out capture_file count_file pid first_beat mid_beat captures i
   dir=$(make_case beat-long-pass); state="$dir/state"; fakebin="$dir/fakebin"
-  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
   printf 'idle, holding for upstream' > "$capture_file"
   make_slow_capture_tmux "$fakebin"
   # Four parked windows, each a one-second capture, none eligible for the
   # capture skip (the recheck marker is backdated past STALE_ESCALATE_SECS), so
-  # the pass spends about four seconds inside the stale loop.
+  # the pass spends about four seconds inside the stale loop. FM_MIDPASS_BEAT_SECS=1
+  # shrinks the production mid-pass bound so that span crosses it.
   for i in 1 2 3 4; do
     prime_paused_window "$state" "parked$i" "test:fm-parked$i" "$capture_file" 500
   done
   export FM_FAKE_CREW_STATE='state: paused · source: status-log · holding for the upstream tool release'
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:unused" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" FM_MIDPASS_BEAT_SECS=1 \
     FM_FAKE_TMUX_CAPTURE_SLEEP=1 FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
-    FM_POLL=3600 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_POLL=30 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
     FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" &
   pid=$!
   # Wait for the pass-start beacon (the top-of-poll touch), then require the
   # beacon to advance again while the pass is still working through its slow
-  # captures: with FM_POLL=3600 the next pass-start touch is an hour away, so
-  # any advance inside the budget is a mid-pass beat.
+  # captures: with FM_POLL=30 the next pass-start touch is far past the
+  # budget, and the capture count below rules out the end-of-pass touch.
   first_beat=""
   i=0
   while [ "$i" -lt 300 ]; do
@@ -6834,6 +6836,7 @@ test_beat_advances_within_a_long_parked_pass() {
   i=0
   while [ "$i" -lt 60 ]; do
     kill -0 "$pid" 2>/dev/null || break
+    captures=$(cat "$count_file" 2>/dev/null || echo 0)
     mid_beat=$(file_mtime "$state/.last-watcher-beat")
     if [ -n "$mid_beat" ] && [ "$mid_beat" != "$first_beat" ]; then
       break
@@ -6845,10 +6848,15 @@ test_beat_advances_within_a_long_parked_pass() {
     reap "$pid"
     fail "beacon did not advance within a long parked pass (still $first_beat after the capture span)"
   fi
+  # The advance must come from inside the pass, not from the end-of-pass touch
+  # before the terminal wait: at least one window's capture must still be ahead
+  # (the count was read before the beacon, and a capture counts when it starts).
+  [ "$captures" -lt 4 ] || { reap "$pid"; fail "beacon advanced only after all $captures captures, at the pass boundary"; }
   # The pass absorbed every parked window silently: no wake, no exit.
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a silently-absorbing parked pass enqueued a wake"; }
   [ ! -s "$out" ] || { reap "$pid"; fail "a silently-absorbing parked pass printed a wake reason: $(cat "$out")"; }
   reap "$pid"
+  unset FM_FAKE_CREW_STATE
   pass "the beacon advances between windows inside a long parked pass, so a live watcher never reads stale"
 }
 
@@ -6901,7 +6909,43 @@ test_paused_recheck_skips_the_pane_capture() {
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the recheck pass enqueued a wake"; }
   [ ! -s "$out" ] || { reap "$pid"; fail "the recheck pass printed a wake reason: $(cat "$out")"; }
   reap "$pid"
+  unset FM_FAKE_CREW_STATE
   pass "an already-paused window skips the pane capture between rechecks, and the recheck cadence still fires"
+}
+
+# The skip must never swallow a re-surface the full path would raise: once a
+# declared until-time passes, the throttle bound to the plain declaration no
+# longer covers the `:due` recheck, so the window pays the capture and the
+# due recheck surfaces on this poll even with a fresh crew-state recheck.
+test_paused_skip_still_reads_a_due_window() {
+  local dir state fakebin out capture_file count_file window statusf pid captures
+  dir=$(make_case paused-skip-due); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; count_file="$dir/captures"
+  window="test:fm-due"; statusf="$state/due.status"
+  printf 'idle, holding for the rate limit' > "$capture_file"
+  make_slow_capture_tmux "$fakebin"
+  prime_paused_window "$state" due "$window" "$capture_file" 0
+  # Re-declare with an until-time already in the past, keeping the throttle on
+  # the plain declaration exactly as a pre-deadline absorb would have left it.
+  printf 'paused: rate limit until %s\n' "$(iso_utc_at "$(( $(date +%s) - 60 ))")" > "$statusf"
+  set_mtime "$(( $(date +%s) - 500 ))" "$statusf"
+  printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-due_status"
+  paused_declaration "$state" "$statusf" > "$state/.paused-resurfaced-$(printf '%s' "$window" | tr ':/.' '___')"
+  export FM_FAKE_CREW_STATE='state: paused · source: status-log · rate limit'
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$count_file" FM_FAKE_TMUX_CURRENT_COMMAND=zsh \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a reached until-time did not surface past the capture skip"; }
+  captures=$(cat "$count_file" 2>/dev/null || echo 0)
+  [ "$captures" -ge 1 ] || fail "a reached until-time was skipped without a pane capture"
+  grep -F "stale: $window" "$out" | grep -F 'declared clearing time has passed' >/dev/null \
+    || fail "a reached until-time did not surface its due recheck: $(cat "$out")"
+  unset FM_FAKE_CREW_STATE
+  pass "a reached until-time pays the pane capture and surfaces its due recheck despite the skip"
 }
 
 # --- afk coherence: the daemon owns triage; the watcher does not double-triage ---
@@ -7487,6 +7531,7 @@ test_heartbeat_backstop_surfaces_a_masked_status
 test_beacon_stays_fresh_while_absorbing
 test_beat_advances_within_a_long_parked_pass
 test_paused_recheck_skips_the_pane_capture
+test_paused_skip_still_reads_a_due_window
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
